@@ -1,0 +1,439 @@
+@page "/"
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IAsyncDisposable
+@inject GameService Games
+@inject WordService Words
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+
+<PageTitle>Lexicube</PageTitle>
+
+@if (game is null)
+{
+    <p class="muted loading">Loading today's puzzle…</p>
+    return;
+}
+
+<div class="stage">
+    <section class="play">
+        <div class="play-head">
+            <div>
+                <span class="puzzle-no">Puzzle #@game.PuzzleNumber</span>
+                <span class="muted">@DateOnly.ParseExact(game.Date, "yyyy-MM-dd").ToString("MMMM d")</span>
+            </div>
+            <div class="tools">
+                <button class="icon-btn" @onclick="ToggleSound" aria-pressed="@(!muted)" title="@(muted ? "Turn sound on" : "Turn sound off")">
+                    @(muted ? "Sound off" : "Sound on")
+                </button>
+                <button class="icon-btn" @onclick="OpenStats">Stats</button>
+            </div>
+        </div>
+
+        <div class="board @(winRow >= 0 ? "won" : "")" role="grid" aria-label="Guesses">
+            @for (var r = 0; r < WordService.MaxGuesses; r++)
+            {
+                var row = r;
+                var guess = row < game.Guesses.Count ? game.Guesses[row] : null;
+                var typing = row == game.Guesses.Count && !game.Finished;
+                <div class="row @(shakeRow == row ? "shake" : "") @(winRow == row ? "win" : "")" role="row" @key="row">
+                    @for (var c = 0; c < WordService.WordLength; c++)
+                    {
+                        var letter = guess is not null ? guess.Word[c].ToString()
+                                   : typing && c < current.Length ? current[c].ToString() : "";
+                        var state = guess is null ? "" : "flip " + guess.States[c].ToString().ToLowerInvariant();
+                        <div class="tile @(letter != "" ? "filled" : "") @state" style="--i:@c" role="gridcell"
+                             aria-label="@(guess is null ? letter : $"{letter}, {guess.States[c]}")">
+                            <div class="cube">
+                                <div class="face front">@letter</div>
+                                <div class="face top">@letter</div>
+                                <div class="face back"></div>
+                                <div class="face bottom"></div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+            @if (toast is not null)
+            {
+                <div class="toast" role="status">@toast</div>
+            }
+        </div>
+
+        <div class="keyboard" aria-label="Keyboard">
+            @foreach (var line in KeyRows)
+            {
+                <div class="krow">
+                    @foreach (var k in line)
+                    {
+                        var key = k;
+                        var cls = key.Length == 1 && keyStates.TryGetValue(key[0], out var ks) ? ks.ToString().ToLowerInvariant() : "";
+                        <button class="key @cls @(key.Length > 1 ? "wide" : "")" data-key="@key" @onclick="() => Press(key)"
+                                aria-label="@(key == "BACK" ? "Backspace" : key == "ENTER" ? "Enter" : key)">
+                            @(key == "BACK" ? "⌫" : key)
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+    </section>
+
+    <aside class="card panel">
+        <div class="tabs" role="tablist">
+            <button role="tab" class="@(!showAllTime ? "on" : "")" aria-selected="@(!showAllTime)" @onclick="() => showAllTime = false">Today</button>
+            <button role="tab" class="@(showAllTime ? "on" : "")" aria-selected="@showAllTime" @onclick="() => showAllTime = true">All-time</button>
+            <span class="live"><i></i>Live</span>
+        </div>
+
+        @if (!showAllTime)
+        {
+            @if (todayRows.Count == 0)
+            {
+                <p class="empty">Nobody has cracked it yet.<br />Be the first on the board.</p>
+            }
+            else
+            {
+                <ol class="leaders">
+                    @foreach (var p in todayRows)
+                    {
+                        <li class="@(p.UserId == userId ? "me" : "") rank-@Math.Min(p.Rank, 4)" @key="p.UserId">
+                            <span class="rank">@p.Rank</span>
+                            <span class="name">@p.Username</span>
+                            <span class="pips" title="@p.Guesses of 6 guesses">
+                                @for (var i = 1; i <= WordService.MaxGuesses; i++)
+                                {
+                                    <i class="@(i <= p.Guesses ? "used" : "")"></i>
+                                }
+                            </span>
+                            <span class="time">@Clock(p.Time)</span>
+                        </li>
+                    }
+                </ol>
+            }
+            <p class="panel-foot muted">@playersToday playing today · fewest guesses wins, time breaks ties</p>
+        }
+        else
+        {
+            @if (allTimeRows.Count == 0)
+            {
+                <p class="empty">No wins recorded yet.</p>
+            }
+            else
+            {
+                <ol class="leaders alltime">
+                    @foreach (var p in allTimeRows)
+                    {
+                        <li class="@(p.UserId == userId ? "me" : "") rank-@Math.Min(p.Rank, 4)" @key="p.UserId">
+                            <span class="rank">@p.Rank</span>
+                            <span class="name">@p.Username</span>
+                            <span class="wins">@p.Wins @(p.Wins == 1 ? "win" : "wins")</span>
+                            <span class="time">avg @p.AvgGuesses.ToString("0.0")</span>
+                        </li>
+                    }
+                </ol>
+            }
+            <p class="panel-foot muted">Most wins, then lowest average guesses</p>
+        }
+    </aside>
+</div>
+
+@if (showStats && stats is not null)
+{
+    <div class="modal" @onclick="CloseStats">
+        <div class="card sheet" role="dialog" aria-modal="true" aria-label="Your results" @onclick:stopPropagation="true">
+            <button class="close" @onclick="CloseStats" aria-label="Close">×</button>
+
+            @if (game.Finished)
+            {
+                <h2 class="@(game.Solved ? "glow" : "")">@(game.Solved ? WinWords[game.Guesses.Count - 1] : "So close")</h2>
+                <p class="muted">
+                    @if (game.Solved)
+                    {
+                        <text>Solved in @game.Guesses.Count of 6 · @Clock(game.FinishedUtc!.Value - game.StartedUtc)</text>
+                    }
+                    else
+                    {
+                        <text>The word was <strong class="answer">@game.Answer</strong></text>
+                    }
+                </p>
+            }
+            else
+            {
+                <h2>Your stats</h2>
+            }
+
+            <div class="nums">
+                <div><b>@stats.Played</b><span>Played</span></div>
+                <div><b>@stats.WinPercent</b><span>Win %</span></div>
+                <div><b>@stats.CurrentStreak</b><span>Streak</span></div>
+                <div><b>@stats.MaxStreak</b><span>Best streak</span></div>
+            </div>
+
+            <h3>Guess distribution</h3>
+            <div class="dist">
+                @{ var top = Math.Max(1, stats.Distribution.Max()); }
+                @for (var i = 0; i < stats.Distribution.Length; i++)
+                {
+                    var n = stats.Distribution[i];
+                    var mine = game.Solved && game.Guesses.Count == i + 1;
+                    <div class="bar-row">
+                        <span>@(i + 1)</span>
+                        <div class="bar @(mine ? "mine" : "")" style="width:@(Math.Max(8, 100 * n / top))%">@n</div>
+                    </div>
+                }
+            </div>
+
+            @if (game.Finished)
+            {
+                <div class="next">
+                    <div>
+                        <span class="muted">Next puzzle in</span>
+                        <b class="countdown">@Countdown()</b>
+                    </div>
+                    <button class="btn primary" @onclick="Share">Share result</button>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    private static readonly string[][] KeyRows =
+    [
+        "Q W E R T Y U I O P".Split(' '),
+        "A S D F G H J K L".Split(' '),
+        "ENTER Z X C V B N M BACK".Split(' '),
+    ];
+    private static readonly string[] WinWords = ["Unreal!", "Brilliant!", "Sharp!", "Nicely done!", "Solid!", "Clutch!"];
+
+    // Must match the flip timing in app.css: 4 × 0.22s stagger + 0.8s spin.
+    private const int RevealMs = 1750;
+
+    [CascadingParameter] private Task<AuthenticationState> AuthState { get; set; } = default!;
+
+    private Guid userId;
+    private GameView? game;
+    private string current = "";
+    private bool busy;
+    private bool muted;
+    private int shakeRow = -1;
+    private int winRow = -1;
+    private string? toast;
+    private int toastVersion;
+    private bool showStats;
+    private bool showAllTime;
+    private PlayerStats? stats;
+    private IReadOnlyList<LeaderRow> todayRows = [];
+    private IReadOnlyList<AllTimeRow> allTimeRows = [];
+    private int playersToday;
+    private Dictionary<char, TileState> keyStates = new();
+    private DotNetObjectReference<Home>? self;
+    private readonly CancellationTokenSource lifetime = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var user = (await AuthState).User;
+        if (!Guid.TryParse(user.FindFirstValue(ClaimTypes.NameIdentifier), out userId) || !Games.UserExists(userId))
+        {
+            Nav.NavigateTo("/account/reset", forceLoad: true);
+            return;
+        }
+
+        LoadGame();
+        showStats = game!.Finished;
+        Games.LeaderboardChanged += OnLeaderboardChanged;
+        _ = TickAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || game is null) return;
+        self = DotNetObjectReference.Create(this);
+        await JS.InvokeVoidAsync("lexi.init", self);
+        muted = await JS.InvokeAsync<bool>("lexi.isMuted");
+        StateHasChanged();
+    }
+
+    private void LoadGame()
+    {
+        game = Games.GetOrStart(userId);
+        current = "";
+        winRow = -1;
+        RebuildKeys();
+        RefreshBoards();
+    }
+
+    private void RefreshBoards()
+    {
+        (todayRows, playersToday) = Games.TodayBoard();
+        allTimeRows = Games.AllTimeBoard();
+        stats = Games.StatsFor(userId);
+    }
+
+    private void RebuildKeys()
+    {
+        keyStates = new();
+        foreach (var g in game!.Guesses)
+            for (var i = 0; i < g.Word.Length; i++)
+                if (!keyStates.TryGetValue(g.Word[i], out var old) || g.States[i] > old)
+                    keyStates[g.Word[i]] = g.States[i];
+    }
+
+    [JSInvokable]
+    public Task OnKey(string key) => Press(key);
+
+    private async Task Press(string key)
+    {
+        if (key == "ESC") { showStats = false; StateHasChanged(); return; }
+        if (game is null || busy || game.Finished || showStats) return;
+
+        if (key == "ENTER") await SubmitAsync();
+        else if (key == "BACK") { if (current.Length > 0) current = current[..^1]; }
+        else if (key.Length == 1 && key[0] is >= 'A' and <= 'Z' && current.Length < WordService.WordLength) current += key;
+
+        StateHasChanged();
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (current.Length < WordService.WordLength) { await RejectAsync("Not enough letters"); return; }
+
+        busy = true;
+        try
+        {
+            var result = Games.Submit(userId, game!.Date, current);
+            if (!result.Ok)
+            {
+                if (result.Error!.Contains("reloading")) { LoadGame(); ShowToast(result.Error); }
+                else await RejectAsync(result.Error);
+                return;
+            }
+
+            var row = game.Guesses.Count;
+            game = result.Game!;
+            current = "";
+            StateHasChanged();
+            await JS.InvokeVoidAsync("lexi.reveal", game.Guesses[row].States.Select(s => (int)s).ToArray());
+            await Task.Delay(RevealMs);
+
+            RebuildKeys(); // keyboard colours only change once the tiles have finished turning
+            if (game.Solved)
+            {
+                winRow = row;
+                RefreshBoards();
+                ShowToast(WinWords[row], 2500);
+                StateHasChanged();
+                await JS.InvokeVoidAsync("lexi.win");
+                await Task.Delay(2600);
+                showStats = true;
+            }
+            else if (game.Finished)
+            {
+                RefreshBoards();
+                ShowToast(game.Answer!, 4000);
+                StateHasChanged();
+                await JS.InvokeVoidAsync("lexi.lose");
+                await Task.Delay(2200);
+                showStats = true;
+            }
+        }
+        finally { busy = false; }
+    }
+
+    private async Task RejectAsync(string message)
+    {
+        shakeRow = game!.Guesses.Count;
+        ShowToast(message);
+        StateHasChanged();
+        await JS.InvokeVoidAsync("lexi.buzz");
+        await Task.Delay(500);
+        shakeRow = -1;
+    }
+
+    private void ShowToast(string message, int ms = 1500)
+    {
+        toast = message;
+        var version = ++toastVersion;
+        _ = Task.Delay(ms).ContinueWith(_ => InvokeAsync(() =>
+        {
+            if (version != toastVersion) return;
+            toast = null;
+            StateHasChanged();
+        }));
+    }
+
+    private void OnLeaderboardChanged() => _ = InvokeAsync(() =>
+    {
+        if (busy) return; // our own finish refreshes after the reveal, so the board doesn't spoil it
+        RefreshBoards();
+        StateHasChanged();
+    });
+
+    /// <summary>Once a second: keeps the countdown moving and swaps in the new puzzle at midnight.</summary>
+    private async Task TickAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(lifetime.Token))
+            {
+                await InvokeAsync(() =>
+                {
+                    if (game is null || busy) return;
+                    if (WordService.Key(Words.Today) != game.Date)
+                    {
+                        showStats = false;
+                        LoadGame();
+                        ShowToast("A new puzzle is ready", 2500);
+                        StateHasChanged();
+                    }
+                    else if (showStats && game.Finished) StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void OpenStats() { RefreshBoards(); showStats = true; }
+    private void CloseStats() => showStats = false;
+
+    private async Task ToggleSound()
+    {
+        muted = !muted;
+        await JS.InvokeVoidAsync("lexi.setMuted", muted);
+    }
+
+    private async Task Share()
+    {
+        var squares = new Dictionary<TileState, string>
+        {
+            [TileState.Correct] = "🟩", [TileState.Present] = "🟨", [TileState.Absent] = "⬛",
+        };
+        var score = game!.Solved ? game.Guesses.Count.ToString() : "X";
+        var lines = game.Guesses.Select(g => string.Concat(g.States.Select(s => squares[s])));
+        var text = $"Lexicube #{game.PuzzleNumber} {score}/6\n\n{string.Join('\n', lines)}";
+        var ok = await JS.InvokeAsync<bool>("lexi.copy", text);
+        ShowToast(ok ? "Copied to clipboard" : "Couldn't copy — try again");
+    }
+
+    private string Countdown()
+    {
+        var left = Words.NextPuzzleUtc() - DateTime.UtcNow;
+        if (left < TimeSpan.Zero) left = TimeSpan.Zero;
+        return $"{(int)left.TotalHours:00}:{left.Minutes:00}:{left.Seconds:00}";
+    }
+
+    private static string Clock(TimeSpan t) =>
+        t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}" : $"{t.Minutes}:{t.Seconds:00}";
+
+    public async ValueTask DisposeAsync()
+    {
+        Games.LeaderboardChanged -= OnLeaderboardChanged;
+        lifetime.Cancel();
+        lifetime.Dispose();
+        try { await JS.InvokeVoidAsync("lexi.dispose"); }
+        catch (JSDisconnectedException) { }
+        catch (OperationCanceledException) { }
+        self?.Dispose();
+    }
+}

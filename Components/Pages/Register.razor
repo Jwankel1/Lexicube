@@ -1,0 +1,61 @@
+@page "/register"
+@inject AuthService Auth
+@inject NavigationManager Nav
+@using Microsoft.AspNetCore.Authentication
+@using Microsoft.AspNetCore.Authentication.Cookies
+
+<PageTitle>Create account · Lexicube</PageTitle>
+
+<section class="card auth-card">
+    <h1>Join the board</h1>
+    <p class="muted">Pick a name for the leaderboard. No email needed.</p>
+
+    <EditForm Model="Input" FormName="register" OnSubmit="Create" method="post">
+        <label>Username
+            <InputText @bind-Value="Input!.Username" autocomplete="username" autocapitalize="none" required minlength="3" maxlength="16" />
+            <small>3–16 letters, numbers or underscores</small>
+        </label>
+        <label>Password
+            <InputText @bind-Value="Input!.Password" type="password" autocomplete="new-password" required minlength="8" />
+            <small>At least 8 characters</small>
+        </label>
+        <label>Confirm password
+            <InputText @bind-Value="Input!.Confirm" type="password" autocomplete="new-password" required />
+        </label>
+        @if (error is not null)
+        {
+            <p class="form-error" role="alert">@error</p>
+        }
+        <button class="btn primary" type="submit">Create account</button>
+    </EditForm>
+
+    <p class="muted switch">Already playing? <a href="/login">Sign in</a></p>
+</section>
+
+@code {
+    [CascadingParameter] private HttpContext Http { get; set; } = default!;
+    [SupplyParameterFromForm] private NewAccount? Input { get; set; }
+
+    private string? error;
+
+    protected override void OnInitialized() => Input ??= new();
+
+    private async Task Create()
+    {
+        if (Input!.Password != Input!.Confirm) { error = "Those passwords don't match."; return; }
+
+        var (user, err) = Auth.Register(Input!.Username, Input!.Password);
+        if (user is null) { error = err; return; }
+
+        await Http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, AuthService.Principal(user),
+            new AuthenticationProperties { IsPersistent = true });
+        Nav.NavigateTo("/", forceLoad: true);
+    }
+
+    public sealed class NewAccount
+    {
+        public string? Username { get; set; }
+        public string? Password { get; set; }
+        public string? Confirm { get; set; }
+    }
+}

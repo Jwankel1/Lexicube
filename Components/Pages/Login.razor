@@ -1,0 +1,54 @@
+@page "/login"
+@inject AuthService Auth
+@inject NavigationManager Nav
+@using Microsoft.AspNetCore.Authentication
+@using Microsoft.AspNetCore.Authentication.Cookies
+
+<PageTitle>Sign in · Lexicube</PageTitle>
+
+<section class="card auth-card">
+    <h1>Welcome back</h1>
+    <p class="muted">One five-letter word a day. Six tries. Everyone gets the same puzzle.</p>
+
+    <EditForm Model="Input" FormName="login" OnSubmit="SignIn" method="post">
+        <label>Username
+            <InputText @bind-Value="Input!.Username" autocomplete="username" autocapitalize="none" required maxlength="16" />
+        </label>
+        <label>Password
+            <InputText @bind-Value="Input!.Password" type="password" autocomplete="current-password" required />
+        </label>
+        @if (error is not null)
+        {
+            <p class="form-error" role="alert">@error</p>
+        }
+        <button class="btn primary" type="submit">Sign in</button>
+    </EditForm>
+
+    <p class="muted switch">New here? <a href="/register">Create an account</a></p>
+</section>
+
+@code {
+    [CascadingParameter] private HttpContext Http { get; set; } = default!;
+    [SupplyParameterFromForm] private Credentials? Input { get; set; }
+    [SupplyParameterFromQuery] private string? ReturnUrl { get; set; }
+
+    private string? error;
+
+    protected override void OnInitialized() => Input ??= new();
+
+    private async Task SignIn()
+    {
+        var (user, err) = Auth.Login(Input!.Username, Input!.Password, Http.Connection.RemoteIpAddress?.ToString());
+        if (user is null) { error = err; return; }
+
+        await Http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, AuthService.Principal(user),
+            new AuthenticationProperties { IsPersistent = true });
+        Nav.NavigateTo("/", forceLoad: true);
+    }
+
+    public sealed class Credentials
+    {
+        public string? Username { get; set; }
+        public string? Password { get; set; }
+    }
+}
